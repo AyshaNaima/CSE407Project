@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Smart Plug Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-black text-white font-sans">
+
+  <div class="max-w-5xl mx-auto p-6 space-y-8">
+    <h1 class="text-3xl font-bold">🔌 Smart Plug Power Dashboard</h1>
+
+    <!-- Device Selector -->
+    <div class="mb-4">
+      <label class="block text-lg mb-2">Select Device:</label>
+      <select id="deviceSelector" class="text-black p-2 rounded">
+        <!-- Filled dynamically -->
+      </select>
+    </div>
+
+    <!-- Device Control Switch -->
+    <div class="mb-6 flex items-center space-x-3">
+      <span class="text-lg">Device Control:</span>
+      <label class="inline-flex items-center cursor-pointer">
+        <input type="checkbox" id="deviceControl" class="sr-only" />
+        <div
+          class="w-12 h-6 bg-gray-500 rounded-full transition-colors duration-300 relative"
+          id="switchTrack"
+        >
+          <div
+            id="switchKnob"
+            class="absolute top-[2px] left-[2px] w-5 h-5 bg-white rounded-full transition-all duration-300"
+          ></div>
+        </div>
+      </label>
+      <span id="deviceStatus" class="text-sm text-gray-400">OFF</span>
+    </div>
+
+    <!-- Stats -->
+    <div class="grid grid-cols-4 gap-4 text-center">
+      <div class="bg-gray-800 p-4 rounded-xl shadow">
+        <div class="text-lg">⚡ Watt</div>
+        <div id="wattLive" class="text-2xl font-bold text-green-400">--</div>
+      </div>
+      <div class="bg-gray-800 p-4 rounded-xl shadow">
+        <div class="text-lg">🔋 Voltage</div>
+        <div id="voltageLive" class="text-2xl font-bold text-blue-400">--</div>
+      </div>
+      <div class="bg-gray-800 p-4 rounded-xl shadow">
+        <div class="text-lg">🔌 Current</div>
+        <div id="currentLive" class="text-2xl font-bold text-yellow-400">--</div>
+      </div>
+      <div class="bg-gray-800 p-4 rounded-xl shadow">
+        <div class="text-lg">⚙️ Total Energy</div>
+        <div id="totalKWh" class="text-2xl font-bold text-pink-400">--</div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="space-y-6">
+      <canvas id="wattChart" height="120"></canvas>
+      <canvas id="voltageChart" height="120"></canvas>
+      <canvas id="currentChart" height="120"></canvas>
+      <h2 class="text-xl font-bold mt-8">📊 Energy Usage (Last 60 Minutes)</h2>
+      <canvas id="minutelyBarChart" height="120"></canvas>
+
+      <h2 class="text-xl font-bold mt-8">Power, Current & Voltage Over Time</h2>
+      <canvas id="multiLineChart" height="120"></canvas>
+
+      <h2 class="text-xl font-bold mt-8">
+        📈 Stacked Area Chart: Current, Watt, Voltage & Total kWh
+      </h2>
+      <canvas id="stackedAreaChart" height="250"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // Assume backend has /api/devices that returns ["LivingRoom","Bedroom"]
+    let selectedDevice = null;
+
+    async function loadDevices() {
+      const res = await fetch("/api/devices");
+      const devices = await res.json();
+      const select = document.getElementById("deviceSelector");
+      select.innerHTML = devices
+        .map((d) => `<option value="${d}">${d}</option>`)
+        .join("");
+      selectedDevice = devices[0];
+
+      // Update UI when device changes
+      select.addEventListener("change", () => {
+        selectedDevice = select.value;
+        updateCharts();
+        updateTotalKWh();
+        updateMinutelyStats();
+        fetchAndUpdateDevicePowerState(selectedDevice); // <--- update power status on device change
+      });
+    }
+
+    // Chart.js context
+    const wattCtx = document.getElementById("wattChart").getContext("2d");
+    const voltageCtx = document.getElementById("voltageChart").getContext("2d");
+    const currentCtx = document.getElementById("currentChart").getContext("2d");
+    const minutelyCtx = document
+      .getElementById("minutelyBarChart")
+      .getContext("2d");
+    const multiLineCtx = document.getElementById("multiLineChart").getContext("2d");
+    const stackedAreaCtx = document
+      .getElementById("stackedAreaChart")
+      .getContext("2d");
+
+    // Chart instances
+    const wattChart = new Chart(wattCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [{ label: "Watt (W)", data: [], borderColor: "#4ade80", fill: false }],
+      },
+      options: { responsive: true, scales: { y: { beginAtZero: true } } },
+    });
+    const voltageChart = new Chart(voltageCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [{ label: "Voltage (V)", data: [], borderColor: "#60a5fa", fill: false }],
+      },
+      options: { responsive: true, scales: { y: { beginAtZero: true } } },
+    });
+    const currentChart = new Chart(currentCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [{ label: "Current (mA)", data: [], borderColor: "#facc15", fill: false }],
+      },
+      options: { responsive: true, scales: { y: { beginAtZero: true } } },
+    });
+    const minutelyBarChart = new Chart(minutelyCtx, {
+      type: "bar",
+      data: {
+        labels: [],
+        datasets: [{ label: "Energy (kWh)", data: [], backgroundColor: "#f87171" }],
+      },
+      options: {
+        responsive: true,
+        scales: {
+          y: { beginAtZero: true },
+          x: { ticks: { maxRotation: 90, minRotation: 45 } },
+        },
+      },
+    });
+    const multiLineChart = new Chart(multiLineCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [
+          { label: "Watt (W)", data: [], borderColor: "#4ade80", yAxisID: "y", fill: false },
+          { label: "Voltage (V)", data: [], borderColor: "#60a5fa", yAxisID: "y", fill: false },
+          { label: "Current (mA)", data: [], borderColor: "#facc15", yAxisID: "y1", fill: false },
+        ],
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: "index", intersect: false },
+        stacked: false,
+        scales: {
+          y: { type: "linear", position: "left", title: { display: true, text: "Watt / Voltage" } },
+          y1: {
+            type: "linear",
+            position: "right",
+            grid: { drawOnChartArea: false },
+            title: { display: true, text: "Current (mA)" },
+          },
+        },
+      },
+    });
+    const stackedAreaChart = new Chart(stackedAreaCtx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: "Watt (W)",
+            data: [],
+            borderColor: "rgba(74,222,128,0.8)",
+            backgroundColor: "rgba(74,222,128,0.4)",
+            fill: true,
+            stack: "combined",
+            tension: 0.3,
+          },
+          {
+            label: "Current (mA)",
+            data: [],
+            borderColor: "rgba(250,204,21,0.8)",
+            backgroundColor: "rgba(250,204,21,0.4)",
+            fill: true,
+            stack: "combined",
+            tension: 0.3,
+          },
+          {
+            label: "Voltage (V)",
+            data: [],
+            borderColor: "rgba(96,165,250,0.8)",
+            backgroundColor: "rgba(96,165,250,0.4)",
+            fill: true,
+            stack: "combined",
+            tension: 0.3,
+          },
+          {
+            label: "Total kWh",
+            data: [],
+            borderColor: "rgba(236,72,153,0.8)",
+            backgroundColor: "rgba(236,72,153,0.4)",
+            fill: true,
+            stack: "combined",
+            tension: 0.3,
+            yAxisID: "y1",
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        stacked: true,
+        scales: {
+          y: { position: "left", min: 5, title: { display: true, text: "Current / Watt / Voltage" } },
+          y1: {
+            position: "right",
+            grid: { drawOnChartArea: false },
+            title: { display: true, text: "Total kWh" },
+          },
+        },
+      },
+    });
+
+    async function updateCharts() {
+      if (!selectedDevice) return;
+      const res = await fetch(`/api/data/${selectedDevice}`);
+      const data = await res.json();
+      const labels = data.map((d) => d.timestamp.slice(11));
+      const watts = data.map((d) => d.watt);
+      const volts = data.map((d) => d.voltage / 10);
+      const currents = data.map((d) => d.current);
+
+      document.getElementById("wattLive").textContent = watts.at(-1) + " W";
+      document.getElementById("voltageLive").textContent = volts.at(-1).toFixed(1) + " V";
+      document.getElementById("currentLive").textContent = currents.at(-1).toFixed(3) + " mA";
+
+      wattChart.data.labels = labels;
+      wattChart.data.datasets[0].data = watts;
+      voltageChart.data.labels = labels;
+      voltageChart.data.datasets[0].data = volts;
+      currentChart.data.labels = labels;
+      currentChart.data.datasets[0].data = currents;
+      multiLineChart.data.labels = labels;
+      multiLineChart.data.datasets[0].data = watts;
+      multiLineChart.data.datasets[1].data = volts;
+      multiLineChart.data.datasets[2].data = currents;
+
+      const totalKWhRes = await fetch(`/api/total-kwh/${selectedDevice}`);
+      const totalKWhData = await totalKWhRes.json();
+      const totalKWhArr = Array(data.length).fill(totalKWhData.total_kwh);
+
+      stackedAreaChart.data.labels = labels;
+      stackedAreaChart.data.datasets[0].data = watts;
+      stackedAreaChart.data.datasets[1].data = currents;
+      stackedAreaChart.data.datasets[2].data = volts;
+      stackedAreaChart.data.datasets[3].data = totalKWhArr;
+
+      wattChart.update();
+      voltageChart.update();
+      currentChart.update();
+      multiLineChart.update();
+      stackedAreaChart.update();
+    }
+
+    async function updateTotalKWh() {
+      if (!selectedDevice) return;
+      const res = await fetch(`/api/total-kwh/${selectedDevice}`);
+      const data = await res.json();
+      document.getElementById("totalKWh").textContent = data.total_kwh + " kWh";
+    }
+
+    async function updateMinutelyStats() {
+      if (!selectedDevice) return;
+      const res = await fetch(`/api/stats/minutely/${selectedDevice}`);
+      const stats = await res.json();
+      minutelyBarChart.data.labels = stats.map((s) => s.minute.slice(11));
+      minutelyBarChart.data.datasets[0].data = stats.map((s) => s.total_kwh);
+      minutelyBarChart.update();
+    }
+
+    // New function: fetch current device power state and update toggle UI
+    async function fetchAndUpdateDevicePowerState(deviceName) {
+      const deviceControl = document.getElementById("deviceControl");
+      const deviceStatus = document.getElementById("deviceStatus");
+      const switchKnob = document.getElementById("switchKnob");
+      const switchTrack = document.getElementById("switchTrack");
+
+      try {
+        const res = await fetch(`/api/device/${deviceName}/power`, { method: "GET" });
+        if (!res.ok) throw new Error("Failed to fetch power state");
+        const data = await res.json();
+        const isOn = data.state === "on";
+
+        // Update checkbox without triggering the change event listener
+        deviceControl.checked = isOn;
+
+        if (isOn) {
+          switchKnob.classList.remove("left-[2px]");
+          switchKnob.classList.add("right-[2px]");
+          switchTrack.classList.replace("bg-gray-500", "bg-green-500");
+          deviceStatus.textContent = "ON";
+          deviceStatus.classList.replace("text-gray-400", "text-green-400");
+        } else {
+          switchKnob.classList.remove("right-[2px]");
+          switchKnob.classList.add("left-[2px]");
+          switchTrack.classList.replace("bg-green-500", "bg-gray-500");
+          deviceStatus.textContent = "OFF";
+          deviceStatus.classList.replace("text-green-400", "text-gray-400");
+        }
+      } catch (err) {
+        console.error(err);
+        alert("Could not get device power state");
+      }
+    }
+
+    async function toggleDeviceControl() {
+      const deviceControl = document.getElementById("deviceControl");
+      const deviceStatus = document.getElementById("deviceStatus");
+      const switchKnob = document.getElementById("switchKnob");
+      const switchTrack = document.getElementById("switchTrack");
+
+      deviceControl.addEventListener("change", async function () {
+        if (!selectedDevice) return;
+
+        const isOn = this.checked;
+
+        // Optimistic UI update
+        if (isOn) {
+          switchKnob.classList.remove("left-[2px]");
+          switchKnob.classList.add("right-[2px]");
+          switchTrack.classList.replace("bg-gray-500", "bg-green-500");
+          deviceStatus.textContent = "ON";
+          deviceStatus.classList.replace("text-gray-400", "text-green-400");
+        } else {
+          switchKnob.classList.remove("right-[2px]");
+          switchKnob.classList.add("left-[2px]");
+          switchTrack.classList.replace("bg-green-500", "bg-gray-500");
+          deviceStatus.textContent = "OFF";
+          deviceStatus.classList.replace("text-green-400", "text-gray-400");
+        }
+
+        // Send command to backend
+        try {
+          const res = await fetch(`/api/device/${selectedDevice}/power`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ state: isOn ? "on" : "off" }),
+          });
+          const data = await res.json();
+          console.log("Device power response:", data);
+
+          if (!res.ok) {
+            // Revert UI on failure
+            deviceControl.checked = !isOn;
+            deviceControl.dispatchEvent(new Event("change"));
+            alert("Failed to change device power state");
+          }
+        } catch (err) {
+          console.error("Error controlling device:", err);
+          // Revert UI on error
+          deviceControl.checked = !isOn;
+          deviceControl.dispatchEvent(new Event("change"));
+          alert("Error controlling device");
+        }
+      });
+    }
+
+    // Periodic updates
+    setInterval(() => {
+      updateCharts();
+      updateTotalKWh();
+    }, 5000);
+
+    setInterval(updateMinutelyStats, 60000);
+
+    // Initial load
+    loadDevices().then(() => {
+      updateCharts();
+      updateTotalKWh();
+      updateMinutelyStats();
+      toggleDeviceControl();
+      fetchAndUpdateDevicePowerState(selectedDevice); // <-- initial toggle status
+    });
+  </script>
+</body>
+
+</html>
