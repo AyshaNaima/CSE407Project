@@ -1,0 +1,12 @@
+[project]
+name = "pcm2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.1.1",
+    "flask-sqlalchemy>=3.1.1",
+    "pandas>=2.3.1",
+    "tinytuya>=1.17.2",
+]
